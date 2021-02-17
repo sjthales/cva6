@@ -34,14 +34,23 @@ BOARD          ?= genesys2
 mkfile_path := $(abspath $(lastword $(MAKEFILE_LIST)))
 root-dir := $(dir $(mkfile_path))
 
-support_verilator_4 := $(shell ($(verilator) --version | grep '4\.') &> /dev/null; echo $$?)
+support_verilator_4 := $(shell ($(verilator) --version | grep '4\.') > /dev/null 2>&1 ; echo $$?)
 ifeq ($(support_verilator_4), 0)
-	verilator_threads := 2
+	ifndef verilator_threads
+		ifeq ($(shell test `nproc` -ge 4; echo $$?),0)
+			verilator_threads := 4
+		else ifeq ($(shell test `nproc` -ge 2; echo $$?),0)
+			verilator_threads := 2
+		endif
+	endif
 endif
 
 ifndef RISCV
 $(error RISCV not set - please point your RISCV variable to your RISCV installation)
 endif
+
+# By default assume spike resides at the RISCV prefix.
+SPIKE_ROOT     ?= $(RISCV)
 
 # setting additional xilinx board parameters for the selected board
 ifeq ($(BOARD), genesys2)
@@ -80,6 +89,7 @@ ariane_pkg := include/riscv_pkg.sv                          \
               src/register_interface/src/reg_intf_pkg.sv    \
               include/axi_intf.sv                           \
               tb/ariane_soc_pkg.sv                          \
+              tb/ariane_axi_soc_pkg.sv                      \
               include/ariane_axi_pkg.sv                     \
               src/fpu/src/fpnew_pkg.sv                      \
               src/fpu/src/fpu_div_sqrt_mvp/hdl/defs_div_sqrt_mvp.sv
@@ -119,8 +129,9 @@ dpi_hdr := $(wildcard tb/dpi/*.h)
 dpi_hdr := $(addprefix $(root-dir), $(dpi_hdr))
 CFLAGS := -I$(QUESTASIM_HOME)/include         \
           -I$(RISCV)/include                  \
+          -I$(SPIKE_ROOT)/include             \
           $(if $(DROMAJO), -I../tb/dromajo/src,) \
-          -std=c++11 -I../tb/dpi
+          -std=c++11 -I../tb/dpi -O3
 
 
 ifdef spike-tandem
@@ -306,40 +317,45 @@ $(dpi-library)/%.o: tb/dpi/%.cc $(dpi_hdr)
 $(dpi-library)/ariane_dpi.so: $(dpi)
 	mkdir -p $(dpi-library)
 	# Compile C-code and generate .so file
-	$(CXX) -shared -m64 -o $(dpi-library)/ariane_dpi.so $? -L$(RISCV)/lib -Wl,-rpath,$(RISCV)/lib -lfesvr
+	$(CXX) -shared -m64 -o $(dpi-library)/ariane_dpi.so $? -L$(RISCV)/lib -L$(SPIKE_ROOT)/lib -Wl,-rpath,$(RISCV)/lib -Wl,-rpath,$(SPIKE_ROOT)/lib -lfesvr
 
 # single test runs on Questa can be started by calling make <testname>, e.g. make towers.riscv
 # the test names are defined in ci/riscv-asm-tests.list, and in ci/riscv-benchmarks.list
 # if you want to run in batch mode, use make <testname> batch-mode=1
 # alternatively you can call make sim elf-bin=<path/to/elf-bin> in order to load an arbitrary binary
+generate-trace-vsim:
+	make sim preload=$(preload) elf-bin= batch-mode=1
+	make generate-trace
+
 sim: build
-	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +MAX_CYCLES=$(max_cycles) +UVM_TESTNAME=$(test_case) \
-	+BASEDIR=$(riscv-test-dir) $(uvm-flags) $(QUESTASIM_FLAGS) -gblso $(RISCV)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi  \
+	vsim${questa_version} +permissive $(questa-flags) -lib $(library) +MAX_CYCLES=$(max_cycles) +UVM_TESTNAME=$(test_case) \
+	-do "coverage save -onexit $(preload).ucdb; run -a; quit -code [coverage attribute -name TESTSTATUS -concise -value $(preload)]" $(questa-cmd) \
+	+BASEDIR=$(riscv-test-dir) $(uvm-flags) $(QUESTASIM_FLAGS) -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi  \
 	${top_level}_optimized +permissive-off ++$(elf-bin) ++$(target-options) | tee sim.log
 
 $(riscv-asm-tests): build
 	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +max-cycles=$(max_cycles) +UVM_TESTNAME=$(test_case) \
-	+BASEDIR=$(riscv-test-dir) $(uvm-flags) +jtag_rbb_enable=0  -gblso $(RISCV)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi        \
+	+BASEDIR=$(riscv-test-dir) $(uvm-flags) +jtag_rbb_enable=0  -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi        \
 	${top_level}_optimized $(QUESTASIM_FLAGS) +permissive-off ++$(riscv-test-dir)/$@ ++$(target-options) | tee tmp/riscv-asm-tests-$@.log
 
 $(riscv-amo-tests): build
 	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +max-cycles=$(max_cycles) +UVM_TESTNAME=$(test_case) \
-	+BASEDIR=$(riscv-test-dir) $(uvm-flags) +jtag_rbb_enable=0  -gblso $(RISCV)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi        \
+	+BASEDIR=$(riscv-test-dir) $(uvm-flags) +jtag_rbb_enable=0  -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi        \
 	${top_level}_optimized $(QUESTASIM_FLAGS) +permissive-off ++$(riscv-test-dir)/$@ ++$(target-options) | tee tmp/riscv-amo-tests-$@.log
 
 $(riscv-mul-tests): build
 	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +max-cycles=$(max_cycles) +UVM_TESTNAME=$(test_case) \
-	+BASEDIR=$(riscv-test-dir) $(uvm-flags) +jtag_rbb_enable=0  -gblso $(RISCV)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi        \
+	+BASEDIR=$(riscv-test-dir) $(uvm-flags) +jtag_rbb_enable=0  -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi        \
 	${top_level}_optimized $(QUESTASIM_FLAGS) +permissive-off ++$(riscv-test-dir)/$@ ++$(target-options) | tee tmp/riscv-mul-tests-$@.log
 
 $(riscv-fp-tests): build
 	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +max-cycles=$(max_cycles) +UVM_TESTNAME=$(test_case) \
-	+BASEDIR=$(riscv-test-dir) $(uvm-flags) +jtag_rbb_enable=0  -gblso $(RISCV)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi        \
+	+BASEDIR=$(riscv-test-dir) $(uvm-flags) +jtag_rbb_enable=0  -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi        \
 	${top_level}_optimized $(QUESTASIM_FLAGS) +permissive-off ++$(riscv-test-dir)/$@ ++$(target-options) | tee tmp/riscv-fp-tests-$@.log
 
 $(riscv-benchmarks): build
 	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +max-cycles=$(max_cycles) +UVM_TESTNAME=$(test_case) \
-	+BASEDIR=$(riscv-benchmarks-dir) $(uvm-flags) +jtag_rbb_enable=0 -gblso $(RISCV)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi   \
+	+BASEDIR=$(riscv-benchmarks-dir) $(uvm-flags) +jtag_rbb_enable=0 -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi   \
 	${top_level}_optimized $(QUESTASIM_FLAGS) +permissive-off ++$(riscv-benchmarks-dir)/$@ ++$(target-options) | tee tmp/riscv-benchmarks-$@.log
 
 # can use -jX to run ci tests in parallel using X processes
@@ -397,8 +413,9 @@ verilate_command := $(verilator)                                                
                     $(if $(DROMAJO), -DDROMAJO=1,)                                                               \
                     $(if $(PROFILE),--stats --stats-vars --profile-cfuncs,)                                      \
                     $(if $(DEBUG),--trace --trace-structs,)                                                      \
-                    -LDFLAGS "-L$(RISCV)/lib -Wl,-rpath,$(RISCV)/lib -lfesvr$(if $(PROFILE), -g -pg,) $(if $(DROMAJO), -L../tb/dromajo/src -ldromajo_cosim,) -lpthread" \
-                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) $(if $(DROMAJO), -DDROMAJO=1,)" -Wall --cc  --vpi \
+                    -LDFLAGS "-L$(RISCV)/lib -L$(SPIKE_ROOT)/lib -Wl,-rpath,$(RISCV)/lib -Wl,-rpath,$(SPIKE_ROOT)/lib -lfesvr$(if $(PROFILE), -g -pg,) $(if $(DROMAJO), -L../tb/dromajo/src -ldromajo_cosim,) -lpthread" \
+                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) $(if $(DROMAJO), -DDROMAJO=1,) -DVL_DEBUG"       \
+                    -Wall --cc  --vpi                                                                            \
                     $(list_incdir) --top-module ariane_testharness                                               \
                     --Mdir $(ver-library) -O3                                                                    \
                     --exe tb/ariane_tb.cpp tb/dpi/SimDTM.cc tb/dpi/SimJTAG.cc                                    \
@@ -531,12 +548,12 @@ torture-rtest-verilator: verilate
 
 run-torture: build
 	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +max-cycles=$(max_cycles)+UVM_TESTNAME=$(test_case)                                  \
-	+BASEDIR=$(riscv-torture-dir) $(uvm-flags) +jtag_rbb_enable=0 -gblso $(RISCV)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi                                      \
+	+BASEDIR=$(riscv-torture-dir) $(uvm-flags) +jtag_rbb_enable=0 -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi                                      \
 	${top_level}_optimized +permissive-off +signature=$(riscv-torture-dir)/$(test-location).rtlsim.sig ++$(riscv-torture-dir)/$(test-location) ++$(target-options)
 
 run-torture-log: build
 	vsim${questa_version} +permissive $(questa-flags) $(questa-cmd) -lib $(library) +max-cycles=$(max_cycles)+UVM_TESTNAME=$(test_case)                                  \
-	+BASEDIR=$(riscv-torture-dir) $(uvm-flags) +jtag_rbb_enable=0 -gblso $(RISCV)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi                                      \
+	+BASEDIR=$(riscv-torture-dir) $(uvm-flags) +jtag_rbb_enable=0 -gblso $(SPIKE_ROOT)/lib/libfesvr.so -sv_lib $(dpi-library)/ariane_dpi                                      \
 	${top_level}_optimized +permissive-off +signature=$(riscv-torture-dir)/$(test-location).rtlsim.sig ++$(riscv-torture-dir)/$(test-location) ++$(target-options)
 	cp vsim.wlf $(riscv-torture-dir)/$(test-location).wlf
 	cp trace_hart_0000.log $(riscv-torture-dir)/$(test-location).trace

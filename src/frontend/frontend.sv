@@ -24,7 +24,7 @@ module frontend import ariane_pkg::*; #(
   input  logic               flush_bp_i,         // flush branch prediction
   input  logic               debug_mode_i,
   // global input
-  input  logic [63:0]        boot_addr_i,
+  input  logic [riscv::VLEN-1:0]        boot_addr_i,
   // Set a new PC
   // mispredict
   input  bp_resolve_t        resolved_branch_i,  // from controller signaling a branch_predict -> update BTB
@@ -230,7 +230,7 @@ module frontend import ariane_pkg::*; #(
     always_comb begin
       bp_valid = 1'b0;
       // BP cannot be valid if we have a return instruction and the RAS is not giving a valid address
-      // Check that we encountered a control flow and that for a return the RAS 
+      // Check that we encountered a control flow and that for a return the RAS
       // contains a valid prediction.
       for (int i = 0; i < INSTR_PER_FETCH; i++) bp_valid |= ((cf_type[i] != NoCF & cf_type[i] != Return) | ((cf_type[i] == Return) & ras_predict.valid));
     end
@@ -289,8 +289,8 @@ module frontend import ariane_pkg::*; #(
       // boot_addr_i will be assigned a constant
       // on the top-level.
       if (npc_rst_load_q) begin
-        npc_d         = boot_addr_i[riscv::VLEN-1:0];
-        fetch_address = boot_addr_i[riscv::VLEN-1:0];
+        npc_d         = boot_addr_i;
+        fetch_address = boot_addr_i;
       end else begin
         fetch_address    = npc_q;
         // keep stable by default
@@ -441,7 +441,7 @@ module frontend import ariane_pkg::*; #(
     // pragma translate_off
     `ifndef VERILATOR
       initial begin
-        assert (FETCH_WIDTH == 32 || FETCH_WIDTH == 64) else $fatal("[frontend] fetch width != not supported");
+        assert (FETCH_WIDTH == 32 || FETCH_WIDTH == 64) else $fatal(1, "[frontend] fetch width != not supported");
       end
     `endif
     // pragma translate_on
